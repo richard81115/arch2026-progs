@@ -1,9 +1,13 @@
 /* Optimal 2x2x2 solver: table-driven IDA* with no heap, no recursion,
- * and no multiplication, division, or remainder. Ported from Homework 1. */
+ * and no multiplication, division, or remainder. Ported from Homework 1.
+ * The last five moves are looked up in a sorted table of the states within
+ * five moves of the solved cube instead of being searched. */
 #include "rubik.h"
+#include "rubik_near.h"
 #include "rubik_tables.h"
 
-enum { MAX_DEPTH = 12 };
+enum { MAX_DEPTH = 12, NEAR_DEPTH = 5 };
+#define NEAR_NONE 0xFFFFFFFFu
 
 /* Row pointers replace face * 5040 and face * 729 index arithmetic. */
 static const uint16_t *const perm_row[3] = {perm_move[0], perm_move[1],
@@ -27,6 +31,56 @@ static uint8_t heuristic(uint16_t p, uint16_t o)
 {
     uint8_t a = perm_dist[p], b = orient_dist[o];
     return a > b ? a : b;
+}
+
+/* Binary search of the near table. Returns the entry, or NEAR_NONE when the
+ * state is more than five moves from the solved cube. */
+static uint32_t near_find(uint32_t key)
+{
+    int32_t lo = 0, hi = (int32_t) NEAR_COUNT - 1;
+    while (lo <= hi) {
+        int32_t mid = (lo + hi) >> 1;
+        uint32_t k = near_table[mid] >> 7;
+        if (k == key)
+            return near_table[mid];
+        if (k < key)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return NEAR_NONE;
+}
+
+/* Split a move code into face and turn by comparison and subtraction. */
+static uint8_t decode(uint8_t code, uint8_t *turn)
+{
+    uint8_t face = 0;
+    if (code >= 3) {
+        face = 1;
+        code = (uint8_t) (code - 3U);
+        if (code >= 3) {
+            face = 2;
+            code = (uint8_t) (code - 3U);
+        }
+    }
+    *turn = code;
+    return face;
+}
+
+/* Follow the table from (p, o) back to the solved cube, writing the moves to
+ * path[g], path[g + 1], ... */
+static void near_finish(uint16_t p, uint16_t o, uint32_t e, uint8_t g)
+{
+    while (((e >> 4) & 7) != 0) {
+        uint8_t m = (uint8_t) (e & 15);
+        path[g++] = m;
+        uint8_t turn, face = decode(m, &turn);
+        for (uint8_t t = 0; t <= turn; t++) {
+            p = perm_row[face][p];
+            o = orient_row[face][o];
+        }
+        e = near_find(((uint32_t) p << 10) | o);
+    }
 }
 
 /* Convert "PPPPPPPOOOOOOO" (digits from '1') into the two ranks.
@@ -54,7 +108,8 @@ static void start_level(uint8_t d, uint16_t p, uint16_t o, uint8_t prev)
     level_turn[d] = 0;
 }
 
-/* One bounded pass of the iterative deepening search. */
+/* One bounded pass of the iterative deepening search. The root is more than
+ * five moves from the solved cube. */
 static int bounded_search(uint16_t p0,
                           uint16_t o0,
                           uint8_t bound,
@@ -66,10 +121,6 @@ static int bounded_search(uint16_t p0,
         if (f < *next_bound)
             *next_bound = f;
         return 0;
-    }
-    if (p0 == 0 && o0 == 0) {
-        *length = 0;
-        return 1;
     }
     uint8_t d = 0;
     start_level(0, p0, o0, 3);
@@ -102,9 +153,20 @@ static int bounded_search(uint16_t p0,
                 *next_bound = f;
             continue;
         }
-        if (np == 0 && no == 0) {
-            *length = g;
-            return 1;
+
+        uint8_t r = (uint8_t) (bound - g);
+        if (r <= NEAR_DEPTH) {
+            uint32_t e = near_find(((uint32_t) np << 10) | no);
+            uint8_t nd =
+                e == NEAR_NONE ? NEAR_DEPTH + 1 : (uint8_t) ((e >> 4) & 7);
+            if (nd <= r) {
+                near_finish(np, no, e, g);
+                *length = (uint8_t) (g + nd);
+                return 1;
+            }
+            if (g + nd < *next_bound)
+                *next_bound = (uint8_t) (g + nd);
+            continue;
         }
         d = g;
         start_level(d, np, no, face);
@@ -114,29 +176,20 @@ static int bounded_search(uint16_t p0,
 /* Solve from the two ranks. The moves are left in path[0 .. length - 1]. */
 static uint8_t solve_ranks(uint16_t p, uint16_t o)
 {
+    uint32_t e = near_find(((uint32_t) p << 10) | o);
+    if (e != NEAR_NONE) {
+        near_finish(p, o, e, 0);
+        return (uint8_t) ((e >> 4) & 7);
+    }
     uint8_t bound = heuristic(p, o), length = 0;
+    if (bound <= NEAR_DEPTH)
+        bound = NEAR_DEPTH + 1;
     for (;;) {
         uint8_t next_bound = UINT8_MAX;
         if (bounded_search(p, o, bound, &next_bound, &length))
             return length;
         bound = next_bound;
     }
-}
-
-/* Split a move code into face and turn by comparison and subtraction. */
-static uint8_t decode(uint8_t code, uint8_t *turn)
-{
-    uint8_t face = 0;
-    if (code >= 3) {
-        face = 1;
-        code = (uint8_t) (code - 3U);
-        if (code >= 3) {
-            face = 2;
-            code = (uint8_t) (code - 3U);
-        }
-    }
-    *turn = code;
-    return face;
 }
 
 static int valid_state(const char *s)
