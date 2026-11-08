@@ -92,5 +92,7 @@ int main(int argc, char **argv)
         printf("\n");
     if (!as_asm)
         printf("};\n");
+    else
+        printf("    .word   0xffffffff              # sentinel\n");
     return 0;
 }
